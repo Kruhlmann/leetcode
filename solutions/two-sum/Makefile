@@ -1,3 +1,2 @@
 two-sum:
-	./bin/submit $@
-
+	./bin/submit $@ "$(L_PYTHON3)" 1

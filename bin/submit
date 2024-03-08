@@ -1,9 +1,9 @@
-#!/usr/bin/env dash
+#!/usr/bin/env sh
 
-set -ex
+set -e
 
 die() {
-    echo $1 >/dev/stderr
+    echo "$1" >/dev/stderr
     exit 1
 }
 
@@ -19,12 +19,20 @@ create_csrftoken() {
     echo "$csrftoken" >.csrftoken
 }
 
+create_userid() {
+    printf 'Enter leetcode userid: '
+    read -r userid
+    echo "$userid" >.userid
+}
+
 create_submission() {
     problem_name="$1"
     language="$2"
-    solution="$(echo "$3" | awk -v ORS='\\n' '1')"
-    payload="{\"lang\":\"$language\",\"question_id\":\"1\",\"typed_code\":\"$solution\"}" 
+    question_id="$3"
+    solution="$(echo "$4" | awk -v ORS='\\n' '1')"
+    payload="{\"lang\":\"$language\",\"question_id\":\"$question_id\",\"typed_code\":\"$solution\"}" 
     curl "https://leetcode.com/problems/$problem_name/submit/" \
+        -s \
         -X POST  \
         -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0' \
         -H 'content-type: application/json' \
@@ -33,11 +41,14 @@ create_submission() {
         -H 'Origin: https://leetcode.com' \
         -H "x-csrftoken: $(cat .csrftoken)" \
         --data-raw "$payload" | jq --raw-output '.submission_id'
+    set +x
 }
 
 get_submission_state() {
     id="$1"
+    problem_name="$2"
     curl "https://leetcode.com/submissions/detail/$id/check/" \
+        -s \
         -X POST  \
         -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0' \
         -H "Cookie: csrftoken=$(cat .csrftoken); LEETCODE_SESSION=$(cat .session);" \
@@ -46,25 +57,59 @@ get_submission_state() {
         -H "x-csrftoken: $(cat .csrftoken)"
 }
 
+get_submission_stats() {
+    id="$1"
+    curl 'https://leetcode.com/graphql/' \
+        -s \
+        --compressed \
+        -X POST \
+        -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0' \
+        -H 'content-type: application/json' \
+            -H "x-csrftoken: $(cat .csrftoken)" \
+        -H 'authorization: ' \
+        -H "random-uuid: $(uuidgen)" \
+        -H "uuuserid: $(cat .userid)" \
+        -H 'Origin: https://leetcode.com' \
+        -H 'Connection: keep-alive' \
+        -H 'Referer: https://leetcode.com/problems/add-two-numbers/submissions/1197958496/' \
+        -H "Cookie: csrftoken=$(cat .csrftoken); LEETCODE_SESSION=$(cat .session);" \
+        -H 'DNT: 1' \
+        -H 'Sec-GPC: 1' \
+        --data-raw '{"query":"query submissionDetails($submissionId: Int!) { submissionDetails(submissionId: $submissionId) { runtimePercentile memoryPercentile } }","variables":{"submissionId":1197958496}}'
+}
+
+get_main_file_from_problem() {
+    main=$(find "solutions/$1" -name 'main*' -type f | head -n 1)
+    test -n "$main" || die "No main file found in solutions/$1"
+    echo "$main"
+}
+
 test -f .session || create_session
 test -f .csrftoken || create_csrftoken
+test -f .userid || create_userid
 problem_name="$1"
 language="$2"
-mainfile=$(find "solutions/$target" -name 'main*' -type f | head -n 1)
-test -n "$mainfile" || die "No main file found in solutions/$target"
-submission_id=$(create_submission "$problem_name" "$language"  "$(cat "$mainfile")")
+question_id="$3"
+mainfile=$(get_main_file_from_problem "$problem_name")
+submission_id=$(create_submission "$problem_name" "$language" "$question_id" "$(cat "$mainfile")")
+
 printf 'Checking %s ' "$problem_name"
 while true; do
-    submission=$(get_submission_state "$submission_id")
-    echo "$submission" | grep '"state": "PENDING"' >/dev/null || break
+    submission=$(get_submission_state "$submission_id" "$problem_name")
+    echo "$submission" | grep -E '"state": "PENDING"|"state": "STARTED"' >/dev/null || break
     sleep 1
 done
 result="$(echo "$submission" | jq -r '.status_msg')"
-set +x
+
 if [ "$result" = "Wrong Answer" ]; then
     printf '\e[31mFAILURE\e[0m\n'
+    echo "$submission" | jq 
 elif [ "$result" = "Accepted" ]; then
-    printf '\e[32mSUCCESS\e[0m\n'
+    stats=$(get_submission_stats "$submission_id")
+    runtime_pct=$(echo "$stats" | jq '.data.submissionDetails.runtimePercentile | tonumber | floor')
+    memory_pct=$(echo "$stats" | jq '.data.submissionDetails.memoryPercentile | tonumber | floor')
+    printf '\e[32mSUCCESS %d%%/%d%%\e[0m\n' "$runtime_pct" "$memory_pct"
 else
-    printf '\e[32m%s\e[0m\n' "$result"
+    echo "Unknown result '$result'"
+    echo "$submission" | jq 
 fi
