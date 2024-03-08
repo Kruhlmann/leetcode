@@ -1,0 +1,70 @@
+#!/usr/bin/env dash
+
+set -ex
+
+die() {
+    echo $1 >/dev/stderr
+    exit 1
+}
+
+create_session() {
+    printf 'Enter leetcode session: '
+    read -r session
+    echo "$session" >.session
+}
+
+create_csrftoken() {
+    printf 'Enter leetcode csrftoken: '
+    read -r csrftoken
+    echo "$csrftoken" >.csrftoken
+}
+
+create_submission() {
+    problem_name="$1"
+    language="$2"
+    solution="$(echo "$3" | awk -v ORS='\\n' '1')"
+    payload="{\"lang\":\"$language\",\"question_id\":\"1\",\"typed_code\":\"$solution\"}" 
+    curl "https://leetcode.com/problems/$problem_name/submit/" \
+        -X POST  \
+        -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0' \
+        -H 'content-type: application/json' \
+        -H "Cookie: csrftoken=$(cat .csrftoken); LEETCODE_SESSION=$(cat .session);" \
+        -H "Referer: https://leetcode.com/problems/$problem_name/" \
+        -H 'Origin: https://leetcode.com' \
+        -H "x-csrftoken: $(cat .csrftoken)" \
+        --data-raw "$payload" | jq --raw-output '.submission_id'
+}
+
+get_submission_state() {
+    id="$1"
+    curl "https://leetcode.com/submissions/detail/$id/check/" \
+        -X POST  \
+        -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0' \
+        -H "Cookie: csrftoken=$(cat .csrftoken); LEETCODE_SESSION=$(cat .session);" \
+        -H "Referer: https://leetcode.com/problems/$problem_name/" \
+        -H 'Origin: https://leetcode.com' \
+        -H "x-csrftoken: $(cat .csrftoken)"
+}
+
+test -f .session || create_session
+test -f .csrftoken || create_csrftoken
+problem_name="$1"
+language="$2"
+mainfile=$(find "solutions/$target" -name 'main*' -type f | head -n 1)
+test -n "$mainfile" || die "No main file found in solutions/$target"
+submission_id=$(create_submission "$problem_name" "$language"  "$(cat "$mainfile")")
+printf 'Checking %s ' "$problem_name"
+while true; do
+    submission=$(get_submission_state "$submission_id")
+    echo "$submission" | grep '"state": "PENDING"' >/dev/null || break
+    sleep 1
+done
+result="$(echo "$submission" | jq -r '.status_msg')"
+set +x
+if [ "$result" = "Wrong Answer" ]; then
+    printf '\e[31mFAILURE\e[0m\n'
+elif [ "$result" = "Accepted" ]; then
+    printf '\e[32mSUCCESS\e[0m\n'
+else
+    printf '\e[32m%s\e[0m\n' "$result"
+fi
